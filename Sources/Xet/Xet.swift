@@ -451,6 +451,29 @@ public final class XetDownloader: @unchecked Sendable {
         var inflightFetches: [FetchRangeKey: Task<FetchedXorb, Error>] = [:]
         let writeRaw = target.writeContentsOf
 
+        let totalBytes = reconstruction.expectedTotalBytes(byteRange: byteRange)
+        let bytesDecodedSoFar = NIOLockedValueBox<Int64>(0)
+
+        let onChunkDecoded: (@Sendable (Int) -> Void)?
+
+        if let progressHandler {
+            // Set the total number of bytes we need to decode
+            progressHandler(0, totalBytes)
+            
+            onChunkDecoded = { count in
+                // Open the bytes box and update the value by the number of bytes we just received.
+                // Also update the progress handler within the lock. Otherwise the handler can be updated at multiple points concurrently and flucate between values.
+                bytesDecodedSoFar.withLockedValue { value in
+                    value = max(Int64(count) + value, value)
+                    
+                    // Update the progress handler.
+                    progressHandler(min(value, totalBytes), totalBytes)
+                }
+            }
+        } else {
+            onChunkDecoded = nil
+        }
+
         func termRange(from fetched: FetchedXorb, for term: CASClient.ReconstructionResponse.Term) throws -> Range<Int>
         {
             let startIndex = term.range.lowerBound - fetched.chunkRange.lowerBound
@@ -512,31 +535,16 @@ public final class XetDownloader: @unchecked Sendable {
             }
 
             totalWritten += Int64(upper - lower)
+            
+            // Once a term finishes, its total written bytes is most likely different from the amount we accumulated during the `onChunkDecoded` callbacks. This is because the chunks ofen use cached bits from previous term decodings.
+            if let progressHandler {
+                bytesDecodedSoFar.withLockedValue { value in
+                    value = max(value, totalWritten)
+                    progressHandler(min(value, totalBytes), totalBytes)
+                }
+            }
         }
         
-        let onChunkDecoded: (@Sendable (Int) -> Void)?
-
-        if let progressHandler {
-            let totalBytes = reconstruction.expectedTotalBytes(byteRange: byteRange)
-            let bytesDecodedSoFar = NIOLockedValueBox<Int64>(0)
-            
-            // Set the total number of bytes we need to decode
-            progressHandler(0, totalBytes)
-            
-            onChunkDecoded = { count in
-                // Open the bytes box and update the value by the number of bytes we just received.
-                let total = bytesDecodedSoFar.withLockedValue { value in
-                    value += Int64(count)
-                    return value
-                }
-                
-                // Update the progress handler.
-                progressHandler(min(total, totalBytes), totalBytes)
-            }
-        } else {
-            onChunkDecoded = nil
-        }
-
         func ensureFetchTask(for context: TermContext) {
             let term = context.term
             let key = context.key
