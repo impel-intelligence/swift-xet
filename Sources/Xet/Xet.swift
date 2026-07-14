@@ -513,7 +513,30 @@ public final class XetDownloader: @unchecked Sendable {
 
             totalWritten += Int64(upper - lower)
         }
+        
+        let onChunkDecoded: (@Sendable (Int) -> Void)?
+
+        if let progressHandler {
+            let totalBytes = reconstruction.expectedTotalBytes(byteRange: byteRange)
+            let bytesDecodedSoFar = NIOLockedValueBox<Int64>(0)
+            
+            // Set the total number of bytes we need to decode
+            progressHandler(0, totalBytes)
+            
+            onChunkDecoded = { count in
+                // Open the bytes box and update the value by the number of bytes we just received.
+                let total = bytesDecodedSoFar.withLockedValue { value in
+                    value += Int64(count)
+                    return value
+                }
                 
+                // Update the progress handler.
+                progressHandler(min(total, totalBytes), totalBytes)
+            }
+        } else {
+            onChunkDecoded = nil
+        }
+
         func ensureFetchTask(for context: TermContext) {
             let term = context.term
             let key = context.key
@@ -525,28 +548,6 @@ public final class XetDownloader: @unchecked Sendable {
             }
             if shouldCacheAllForXorb, chunkCache[key] != nil {
                 return
-            }
-            
-            let onChunkDecoded: (@Sendable (Int) -> Void)?
-            if let progressHandler {
-                let totalBytes = reconstruction.expectedTotalBytes(byteRange: byteRange)
-                let bytesDecodedSoFar = NIOLockedValueBox<Int64>(0)
-                
-                // Set the total number of bytes we need to decode
-                progressHandler(0, totalBytes)
-                
-                onChunkDecoded = { count in
-                    // Open the bytes box and update the value by the number of bytes we just received.
-                    let total = bytesDecodedSoFar.withLockedValue { value in
-                        value += Int64(count)
-                        return value
-                    }
-                    
-                    // Update the progress handler.
-                    progressHandler(min(total, totalBytes), totalBytes)
-                }
-            } else {
-                onChunkDecoded = nil
             }
 
             inflightFetches[key] = Task {
