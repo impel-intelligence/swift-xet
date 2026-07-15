@@ -452,7 +452,13 @@ public final class XetDownloader: @unchecked Sendable {
         let writeRaw = target.writeContentsOf
 
         let totalBytes = reconstruction.expectedTotalBytes(byteRange: byteRange)
-        let bytesDecodedSoFar = NIOLockedValueBox<Int64>(0)
+
+        let progressWorkQueue = DispatchQueue(label: "Xet.download.progress")
+        var bytesDecodedSoFar: Int64 = 0
+        var lastUpdatedBytes: Int64 = 0
+        
+        // Update very 1 MB
+        let progressReportingByteInterval: Int64 = 1 * 2024 * 1024
 
         let onChunkDecoded: (@Sendable (Int) -> Void)?
 
@@ -461,13 +467,13 @@ public final class XetDownloader: @unchecked Sendable {
             progressHandler(0, totalBytes)
             
             onChunkDecoded = { count in
-                // Open the bytes box and update the value by the number of bytes we just received.
-                // Also update the progress handler within the lock. Otherwise the handler can be updated at multiple points concurrently and flucate between values.
-                bytesDecodedSoFar.withLockedValue { value in
-                    value = max(Int64(count) + value, value)
+                // Enter all progress handler updates into the progress work queue. Ensures serialized updates of the progress without waiting hanging for a mutex.
+                progressWorkQueue.async {
+                    bytesDecodedSoFar = max(Int64(count) + bytesDecodedSoFar, bytesDecodedSoFar)
                     
-                    // Update the progress handler.
-                    progressHandler(min(value, totalBytes), totalBytes)
+                    guard bytesDecodedSoFar >= lastUpdatedBytes + progressReportingByteInterval else { return }
+                    lastUpdatedBytes = bytesDecodedSoFar
+                    progressHandler(min(bytesDecodedSoFar, totalBytes), totalBytes)
                 }
             }
         } else {
@@ -538,9 +544,10 @@ public final class XetDownloader: @unchecked Sendable {
             
             // Once a term finishes, its total written bytes is most likely different from the amount we accumulated during the `onChunkDecoded` callbacks. This is because the chunks ofen use cached bits from previous term decodings.
             if let progressHandler {
-                bytesDecodedSoFar.withLockedValue { value in
-                    value = max(value, totalWritten)
-                    progressHandler(min(value, totalBytes), totalBytes)
+                progressWorkQueue.async {
+                    bytesDecodedSoFar = max(bytesDecodedSoFar, totalWritten)
+                    lastUpdatedBytes = bytesDecodedSoFar
+                    progressHandler(min(bytesDecodedSoFar, totalBytes), totalBytes)
                 }
             }
         }
